@@ -1,0 +1,67 @@
+environment:
+  name: production
+  identifier: production
+  description: "Ambiente de produção — deploy somente via pipeline aprovado"
+  orgIdentifier: default
+  projectIdentifier: harness_demo
+  type: Production
+  tags:
+    env: production
+    team: platform
+    critical: "true"
+  variables:
+    - name: REPLICAS
+      type: String
+      value: "4"
+    - name: LOG_LEVEL
+      type: String
+      value: "info"
+    - name: API_URL
+      type: String
+      value: "https://api.harness-demo.io"
+    - name: ENABLE_TRACING
+      type: String
+      value: "true"
+  overrides:
+    manifests:
+      - manifest:
+          identifier: k8s_manifests_production
+          type: K8sManifest
+          spec:
+            store:
+              type: Github
+              spec:
+                connectorRef: account.github_leandroninja
+                gitFetchType: Branch
+                branch: main
+                paths:
+                  - k8s/namespace.yaml
+                  - k8s/blue/deployment.yaml
+                  - k8s/green/deployment.yaml
+                  - k8s/service.yaml
+                  - k8s/hpa.yaml
+
+# infra de produção — blue green
+infrastructureDefinitions:
+  - infrastructure:
+      identifier: gke_production_blue
+      name: GKE Production Blue
+      type: KubernetesDirect
+      spec:
+        connectorRef: gke_prod_cluster
+        namespace: harness-demo-production
+        releaseName: harness-demo-blue
+      tags:
+        env: production
+        slot: blue
+  - infrastructure:
+      identifier: gke_production_green
+      name: GKE Production Green
+      type: KubernetesDirect
+      spec:
+        connectorRef: gke_prod_cluster
+        namespace: harness-demo-production
+        releaseName: harness-demo-green
+      tags:
+        env: production
+        slot: green

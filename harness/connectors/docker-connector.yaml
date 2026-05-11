@@ -1,0 +1,20 @@
+connector:
+  name: dockerhub-leandroninja
+  identifier: dockerhub_leandroninja
+  description: "Docker Hub connector para push/pull de imagens"
+  orgIdentifier: default
+  projectIdentifier: harness_demo
+  type: DockerRegistry
+  spec:
+    dockerRegistryUrl: https://index.docker.io/v1/
+    # tipo de autenticação — usar secret do Harness, nunca hardcode
+    auth:
+      type: UsernamePassword
+      spec:
+        username: leandroninja
+        # a senha fica como secret no Harness Secret Manager
+        passwordRef: account.dockerhub_password
+    executeOnDelegate: false
+  tags:
+    team: platform
+    managed-by: harness

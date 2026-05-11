@@ -1,0 +1,52 @@
+environment:
+  name: staging
+  identifier: staging
+  description: "Ambiente de homologação — não usar para testes de carga"
+  orgIdentifier: default
+  projectIdentifier: harness_demo
+  type: PreProduction
+  tags:
+    env: staging
+    team: platform
+  variables:
+    - name: REPLICAS
+      type: String
+      value: "2"
+      description: "número de replicas no staging"
+    - name: LOG_LEVEL
+      type: String
+      value: "debug"
+    - name: API_URL
+      type: String
+      value: "https://api-staging.harness-demo.internal"
+  overrides:
+    manifests:
+      - manifest:
+          identifier: k8s_manifests_staging
+          type: K8sManifest
+          spec:
+            store:
+              type: Github
+              spec:
+                connectorRef: account.github_leandroninja
+                gitFetchType: Branch
+                branch: main
+                paths:
+                  - k8s/namespace.yaml
+                  - k8s/blue/deployment.yaml
+                  - k8s/service.yaml
+                  - k8s/hpa.yaml
+    configFiles: []
+
+# infraestrutura de destino para o staging
+infrastructureDefinitions:
+  - infrastructure:
+      identifier: gke_staging_ns
+      name: GKE Staging Namespace
+      type: KubernetesDirect
+      spec:
+        connectorRef: gke_prod_cluster
+        namespace: harness-demo-staging
+        releaseName: harness-demo-staging
+      tags:
+        env: staging

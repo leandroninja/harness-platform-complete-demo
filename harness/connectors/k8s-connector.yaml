@@ -1,0 +1,21 @@
+connector:
+  name: gke-prod-cluster
+  identifier: gke_prod_cluster
+  description: "Conector para o cluster GKE de produção na GCP"
+  orgIdentifier: default
+  projectIdentifier: harness_demo
+  type: K8sCluster
+  spec:
+    # autenticação via service account do GKE
+    credential:
+      type: InheritFromDelegate
+      spec:
+        delegateSelectors:
+          - harness-delegate-gke
+    # delegateSelectors define qual delegate vai executar as operações
+    delegateSelectors:
+      - harness-delegate-gke
+  tags:
+    env: production
+    team: platform
+    managed-by: harness
