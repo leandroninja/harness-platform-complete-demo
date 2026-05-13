@@ -1,0 +1,161 @@
+pipeline:
+  name: "CI — Build, Test and Scan"
+  identifier: ci_build_test_scan
+  projectIdentifier: harness_demo
+  orgIdentifier: default
+  description: "Pipeline de CI: instala deps, roda testes, build da imagem Docker, push registry e scan de vulnerabilidades"
+  tags:
+    type: ci
+    team: platform
+
+  properties:
+    ci:
+      codebase:
+        connectorRef: account.github_leandroninja
+        repoName: harness-platform-complete-demo
+        build: <+input>
+
+  stages:
+    - stage:
+        name: Build and Test
+        identifier: build_and_test
+        type: CI
+        spec:
+          cloneCodebase: true
+          # roda em delegate com docker instalado
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              # step 1: instala dependências e faz cache
+              - step:
+                  name: Install Dependencies
+                  identifier: install_deps
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub_leandroninja
+                    image: python:3.11-slim
+                    command: |
+                      cd app
+                      pip install --upgrade pip
+                      pip install -r requirements.txt
+                      echo "dependências instaladas com sucesso"
+                  failureStrategies: []
+
+              # step 2: lint com ruff (mais rápido que flake8)
+              - step:
+                  name: Lint
+                  identifier: lint
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub_leandroninja
+                    image: python:3.11-slim
+                    command: |
+                      cd app
+                      pip install ruff --quiet
+                      ruff check . --output-format=github
+                      echo "lint ok"
+
+              # step 3: roda os testes com cobertura
+              - step:
+                  name: Run Tests
+                  identifier: run_tests
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub_leandroninja
+                    image: python:3.11-slim
+                    command: |
+                      cd app
+                      pip install -r requirements.txt pytest pytest-asyncio httpx --quiet
+                      pytest tests/ -v --tb=short --cov=. --cov-report=xml:coverage.xml
+                      echo "testes finalizados"
+                    reports:
+                      type: JUnit
+                      spec:
+                        paths:
+                          - "app/test-results.xml"
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: Abort
+
+              # step 4: build da imagem docker
+              - step:
+                  name: Build Docker Image
+                  identifier: build_docker_image
+                  type: BuildAndPushDockerRegistry
+                  spec:
+                    connectorRef: dockerhub_leandroninja
+                    repo: leandroninja/harness-demo-api
+                    tags:
+                      - <+pipeline.sequenceId>
+                      - <+pipeline.variables.IMAGE_TAG>
+                    context: app
+                    dockerfile: app/Dockerfile
+                    # label com info do build pra rastreabilidade
+                    labels:
+                      build-id: <+pipeline.sequenceId>
+                      commit-sha: <+codebase.commitSha>
+                      branch: <+codebase.branch>
+                    optimize: true
+
+              # step 5: scan de vulnerabilidades com trivy
+              - step:
+                  name: Trivy Container Scan
+                  identifier: trivy_scan
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub_leandroninja
+                    image: aquasec/trivy:latest
+                    command: |
+                      trivy image \
+                        --exit-code 1 \
+                        --severity CRITICAL \
+                        --format table \
+                        leandroninja/harness-demo-api:<+pipeline.sequenceId>
+                      echo "scan trivy concluído"
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: Abort
+
+              # step 6: push da imagem com tag latest (só se branch main)
+              - step:
+                  name: Tag as Latest
+                  identifier: tag_latest
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub_leandroninja
+                    image: docker:24-cli
+                    command: |
+                      docker tag leandroninja/harness-demo-api:<+pipeline.sequenceId> \
+                                 leandroninja/harness-demo-api:latest
+                      docker push leandroninja/harness-demo-api:latest
+                      echo "imagem taggeada como latest"
+                  when:
+                    condition: <+codebase.branch> == "main"
+
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: gke_prod_cluster
+              namespace: harness-ci
+              automountServiceAccountToken: true
+
+        variables:
+          - name: IMAGE_TAG
+            type: String
+            value: <+codebase.shortCommitSha>
+
+  variables:
+    - name: REGISTRY
+      type: String
+      value: docker.io
+    - name: IMAGE_NAME
+      type: String
+      value: leandroninja/harness-demo-api
