@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: harness-demo-api
+  namespace: harness-demo-production
+  labels:
+    app: harness-demo-api
+    team: platform
+    app.kubernetes.io/managed-by: harness
+  annotations:
+    # esse annotation é atualizado pelo script switch-traffic.sh
+    deployment.kubernetes.io/active-slot: blue
+spec:
+  type: ClusterIP
+  # selector aponta para o slot ativo
+  # o pipeline de CD faz patch aqui pra trocar entre blue/green
+  selector:
+    app: harness-demo-api
+    slot: blue
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+  sessionAffinity: None
+---
+# service separado pro slot green pra health check antes do switch
+apiVersion: v1
+kind: Service
+metadata:
+  name: harness-demo-api-green
+  namespace: harness-demo-production
+  labels:
+    app: harness-demo-api
+    slot: green
+    team: platform
+spec:
+  type: ClusterIP
+  selector:
+    app: harness-demo-api
+    version: green
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

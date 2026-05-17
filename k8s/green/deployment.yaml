@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harness-demo-api-green
+  namespace: harness-demo-production
+  labels:
+    app: harness-demo-api
+    version: green
+    team: platform
+    app.kubernetes.io/name: harness-demo-api
+    app.kubernetes.io/version: green
+    app.kubernetes.io/managed-by: harness
+  annotations:
+    deployment.kubernetes.io/slot: green
+    deployment.harness.io/pipeline-id: cd_blue_green_deploy
+spec:
+  # começa com 0 — o harness escala quando vai fazer deploy no green
+  replicas: 0
+  selector:
+    matchLabels:
+      app: harness-demo-api
+      version: green
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: harness-demo-api
+        version: green
+        team: platform
+      annotations:
+        checksum/config: "placeholder-atualizado-pelo-harness"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          # imagem do green — tag atualizada pelo pipeline
+          image: leandroninja/harness-demo-api:green
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: LOG_LEVEL
+              value: "info"
+            - name: PORT
+              value: "8080"
+            - name: SLOT
+              value: "green"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+            timeoutSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 12
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: harness-demo-api
+              version: green
+      terminationGracePeriodSeconds: 30

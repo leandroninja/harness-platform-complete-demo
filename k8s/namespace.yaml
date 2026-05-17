@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harness-demo-production
+  labels:
+    app.kubernetes.io/managed-by: harness
+    team: platform
+    env: production
+    # label necessário pro network policy funcionar
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harness-demo-staging
+  labels:
+    app.kubernetes.io/managed-by: harness
+    team: platform
+    env: staging
+    pod-security.kubernetes.io/enforce: baseline

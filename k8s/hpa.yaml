@@ -1,0 +1,52 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: harness-demo-api-hpa
+  namespace: harness-demo-production
+  labels:
+    app: harness-demo-api
+    team: platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    # aponta pro deployment ativo (blue por padrão)
+    # TODO: fazer isso dinâmico baseado no slot ativo
+    name: harness-demo-api-blue
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    # escala por CPU
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # escala por memória também
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    # scale up rápido em picos de tráfego
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+      selectPolicy: Max
+    # scale down conservador pra evitar flapping
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min
