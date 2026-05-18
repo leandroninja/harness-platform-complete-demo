@@ -1,0 +1,281 @@
+pipeline:
+  name: "CD — Blue-Green Deploy"
+  identifier: cd_blue_green_deploy
+  projectIdentifier: harness_demo
+  orgIdentifier: default
+  description: "Pipeline de CD com estratégia blue-green, approval gate e rollback automático"
+  tags:
+    type: cd
+    team: platform
+    strategy: blue-green
+
+  stages:
+    # stage 1: deploy no staging com validação
+    - stage:
+        name: Deploy Staging
+        identifier: deploy_staging
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: harness_demo_api
+            serviceInputs:
+              serviceDefinition:
+                type: Kubernetes
+                spec:
+                  artifacts:
+                    primary:
+                      primaryArtifactRef: primary
+                      sources:
+                        - spec:
+                            connectorRef: dockerhub_leandroninja
+                            imagePath: leandroninja/harness-demo-api
+                            tag: <+pipeline.variables.IMAGE_TAG>
+                          identifier: primary
+                          type: DockerRegistry
+          environment:
+            environmentRef: staging
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: gke_staging_ns
+          execution:
+            steps:
+              # aplica manifests no staging
+              - step:
+                  name: K8s Apply Staging
+                  identifier: k8s_apply_staging
+                  type: K8sApply
+                  spec:
+                    filePaths:
+                      - k8s/namespace.yaml
+                      - k8s/blue/deployment.yaml
+                      - k8s/service.yaml
+                      - k8s/hpa.yaml
+                    skipDryRun: false
+                    skipSteadyStateCheck: false
+                    commandFlags: []
+
+              # aguarda pods ficarem ready
+              - step:
+                  name: Wait for Pods
+                  identifier: wait_pods_staging
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "aguardando pods ficarem ready no staging..."
+                          kubectl wait --for=condition=ready pod \
+                            -l app=harness-demo-api \
+                            -n harness-demo-staging \
+                            --timeout=120s
+                          echo "pods ok"
+                    environmentVariables: []
+                    outputVariables: []
+
+              # smoke test básico
+              - step:
+                  name: Smoke Test Staging
+                  identifier: smoke_test_staging
+                  type: Http
+                  spec:
+                    url: https://api-staging.harness-demo.internal/health
+                    method: GET
+                    assertion: <+httpResponseCode> == 200
+                    timeout: 30s
+
+            rollbackSteps:
+              - step:
+                  name: Rollback Staging
+                  identifier: rollback_staging
+                  type: K8sRollingRollback
+                  spec: {}
+
+        tags:
+          env: staging
+
+    # approval gate entre staging e production
+    - stage:
+        name: Approval Gate
+        identifier: approval_gate
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Aprovação para Produção
+                  identifier: aprovacao_producao
+                  type: HarnessApproval
+                  spec:
+                    approvalMessage: |
+                      Deploy da versão <+pipeline.variables.IMAGE_TAG> para produção.
+
+                      Ambiente de staging validado com sucesso.
+                      Por favor revise o changelog e aprove para continuar.
+                    includePipelineExecutionHistory: true
+                    approvers:
+                      userGroups:
+                        - account.platform_team
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs: []
+                  timeout: 24h
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - Timeout
+                        action:
+                          type: Abort
+
+    # stage 3: blue-green deploy em produção
+    - stage:
+        name: Deploy Production Blue-Green
+        identifier: deploy_production_bg
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: harness_demo_api
+            serviceInputs:
+              serviceDefinition:
+                type: Kubernetes
+                spec:
+                  artifacts:
+                    primary:
+                      primaryArtifactRef: primary
+                      sources:
+                        - spec:
+                            connectorRef: dockerhub_leandroninja
+                            imagePath: leandroninja/harness-demo-api
+                            tag: <+pipeline.variables.IMAGE_TAG>
+                          identifier: primary
+                          type: DockerRegistry
+          environment:
+            environmentRef: production
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: gke_production_green
+          execution:
+            steps:
+              # deploya no slot green (inativo)
+              - step:
+                  name: Deploy to Green Slot
+                  identifier: deploy_green
+                  type: K8sApply
+                  spec:
+                    filePaths:
+                      - k8s/green/deployment.yaml
+                    skipDryRun: false
+                    skipSteadyStateCheck: false
+
+              # aguarda green ficar saudável
+              - step:
+                  name: Health Check Green
+                  identifier: health_check_green
+                  type: Http
+                  spec:
+                    url: https://api-green.harness-demo.io/health
+                    method: GET
+                    assertion: <+httpResponseCode> == 200
+                    timeout: 60s
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: StageRollback
+
+              # switch de tráfego: service passa a apontar pro green
+              - step:
+                  name: Switch Traffic to Green
+                  identifier: switch_traffic_green
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "trocando tráfego para o slot green..."
+                          kubectl patch service harness-demo-api \
+                            -n harness-demo-production \
+                            -p '{"spec":{"selector":{"version":"green"}}}'
+                          echo "tráfego redirecionado para green"
+                    environmentVariables: []
+                    outputVariables: []
+
+              # verifica health depois do switch
+              - step:
+                  name: Post-Switch Health Check
+                  identifier: post_switch_health
+                  type: Http
+                  spec:
+                    url: https://api.harness-demo.io/health
+                    method: GET
+                    assertion: <+httpResponseCode> == 200
+                    timeout: 30s
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: StageRollback
+
+              # mantém blue em standby por 10min antes de desligar
+              - step:
+                  name: Standby Blue Slot
+                  identifier: standby_blue
+                  type: Wait
+                  spec:
+                    duration: 10m
+
+              # desliga o deployment blue
+              - step:
+                  name: Scale Down Blue
+                  identifier: scale_down_blue
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          kubectl scale deployment harness-demo-api-blue \
+                            --replicas=0 \
+                            -n harness-demo-production
+                          echo "blue slot escalado para 0 replicas"
+
+            # rollback automático se algo der errado
+            rollbackSteps:
+              - step:
+                  name: Rollback to Blue
+                  identifier: rollback_to_blue
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "ROLLBACK — voltando tráfego para blue..."
+                          kubectl patch service harness-demo-api \
+                            -n harness-demo-production \
+                            -p '{"spec":{"selector":{"version":"blue"}}}'
+
+                          # garante que blue está com replicas
+                          kubectl scale deployment harness-demo-api-blue \
+                            --replicas=4 \
+                            -n harness-demo-production
+
+                          echo "rollback concluído — tráfego no blue"
+
+        tags:
+          env: production
+
+  variables:
+    - name: IMAGE_TAG
+      type: String
+      value: <+input>
+      description: "Tag da imagem Docker a ser deployada"
