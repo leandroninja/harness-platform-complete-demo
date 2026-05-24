@@ -16,7 +16,7 @@ spec:
   # o pipeline de CD faz patch aqui pra trocar entre blue/green
   selector:
     app: harness-demo-api
-    slot: blue
+    version: blue
   ports:
     - name: http
       port: 80
