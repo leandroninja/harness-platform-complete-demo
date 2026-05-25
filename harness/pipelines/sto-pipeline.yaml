@@ -1,0 +1,171 @@
+pipeline:
+  name: "STO — Security Testing Orchestration"
+  identifier: sto_security_pipeline
+  projectIdentifier: harness_demo
+  orgIdentifier: default
+  description: "Pipeline de segurança completo: SAST, container scan, DAST e IaC scan com thresholds configurados"
+  tags:
+    type: sto
+    team: security
+
+  stages:
+    - stage:
+        name: Security Tests
+        identifier: security_tests
+        type: SecurityTests
+        spec:
+          cloneCodebase: true
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              # SAST com Semgrep — analisa o código estático
+              - step:
+                  name: SAST — Semgrep
+                  identifier: sast_semgrep
+                  type: Semgrep
+                  spec:
+                    mode: orchestration
+                    config: default
+                    target:
+                      type: repository
+                      name: harness-platform-complete-demo
+                      variant: <+codebase.branch>
+                    advanced:
+                      log:
+                        level: info
+                      fail_on_severity: critical
+                    settings:
+                      # usa o ruleset padrão do semgrep + regras customizadas
+                      args: "--config auto --config p/python"
+
+              # scan de secrets com Gitleaks
+              - step:
+                  name: Secrets Scan — Gitleaks
+                  identifier: secrets_gitleaks
+                  type: Gitleaks
+                  spec:
+                    mode: orchestration
+                    config: default
+                    target:
+                      type: repository
+                      name: harness-platform-complete-demo
+                      variant: <+codebase.branch>
+                    advanced:
+                      log:
+                        level: info
+                      fail_on_severity: critical
+
+              # container scan com Aqua Trivy
+              - step:
+                  name: Container Scan — Trivy
+                  identifier: container_trivy
+                  type: AquaTrivy
+                  spec:
+                    mode: orchestration
+                    config: default
+                    target:
+                      type: container
+                      name: leandroninja/harness-demo-api
+                      variant: <+pipeline.variables.IMAGE_TAG>
+                    advanced:
+                      log:
+                        level: info
+                      # bloqueia se tiver qualquer critical
+                      fail_on_severity: critical
+                    privileged: false
+                    image:
+                      type: docker_v2
+                      name: leandroninja/harness-demo-api
+                      tag: <+pipeline.variables.IMAGE_TAG>
+                      access_id: leandroninja
+                      access_token: <+secrets.getValue("dockerhub_password")>
+                      domain: docker.io
+
+              # IaC scan com Checkov — analisa terraform e k8s manifests
+              - step:
+                  name: IaC Scan — Checkov
+                  identifier: iac_checkov
+                  type: Checkov
+                  spec:
+                    mode: orchestration
+                    config: default
+                    target:
+                      type: repository
+                      name: harness-platform-complete-demo
+                      variant: <+codebase.branch>
+                    advanced:
+                      log:
+                        level: info
+                      fail_on_severity: high
+                    settings:
+                      # scanneia terraform e k8s
+                      args: "--directory terraform --directory k8s"
+
+              # DAST com OWASP ZAP — testa a aplicação em execução
+              - step:
+                  name: DAST — OWASP ZAP
+                  identifier: dast_owasp_zap
+                  type: Zap
+                  spec:
+                    mode: orchestration
+                    config: default
+                    target:
+                      type: instance
+                      name: harness-demo-api-staging
+                      # aponta pro ambiente de staging que deve estar rodando
+                      variant: https://api-staging.harness-demo.internal
+                    advanced:
+                      log:
+                        level: info
+                      fail_on_severity: high
+                    settings:
+                      # scan passivo + ativo básico
+                      scan_type: api
+                      context: api-context
+
+          # thresholds globais de segurança
+          # critical: 0 significa que um único critical bloqueia o pipeline
+          slsa_provenance:
+            enabled: false
+
+          # configuração de policy — define o que bloqueia vs o que é aviso
+          # isso é configurado no Harness Policy Engine via OPA
+          policyConfig:
+            ref: security_gate_policy
+
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: gke_prod_cluster
+              namespace: harness-sto
+              automountServiceAccountToken: true
+
+        variables:
+          - name: SCAN_THRESHOLD_CRITICAL
+            type: String
+            value: "0"
+            description: "número máximo de CVEs críticos permitidos — zero bloqueia"
+          - name: SCAN_THRESHOLD_HIGH
+            type: String
+            value: "5"
+            description: "número máximo de CVEs altos permitidos"
+
+  # notificações quando scan falhar
+  notificationRules:
+    - name: security-failure-alert
+      identifier: security_failure_alert
+      pipelineEvents:
+        - type: StageFailed
+          forStages:
+            - security_tests
+      notificationMethod:
+        type: Slack
+        spec:
+          webhookUrl: <+secrets.getValue("slack_security_webhook")>
+
+  variables:
+    - name: IMAGE_TAG
+      type: String
+      value: <+input>
