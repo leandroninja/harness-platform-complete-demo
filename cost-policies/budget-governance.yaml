@@ -1,0 +1,141 @@
+# Configuração de orçamentos e políticas de custo
+# Gerenciado pelo Harness CCM
+# Referência: https://developer.harness.io/docs/cloud-cost-management/
+
+budgets:
+  # orçamento geral do projeto
+  - name: harness-demo-monthly-total
+    identifier: harness_demo_monthly_total
+    description: "Orçamento mensal total do projeto harness-platform-complete-demo"
+    scope:
+      type: account
+      # filtra apenas recursos com tag do projeto
+      filterTags:
+        project: harness-platform-complete-demo
+    budget:
+      type: SPECIFIED_AMOUNT
+      # USD 500 por mês — suficiente pra um GKE pequeno + Docker Hub
+      amount: 500
+      period: MONTHLY
+    alerts:
+      - type: PERCENTAGE
+        threshold: 50
+        basedOn: ACTUAL_COST
+        notifications:
+          - slack: "#finops-alerts"
+          - email: "leandroninja@gmail.com"
+      - type: PERCENTAGE
+        threshold: 80
+        basedOn: ACTUAL_COST
+        notifications:
+          - slack: "#finops-alerts"
+          - slack: "#platform-team"
+          - email: "leandroninja@gmail.com"
+      # alerta de forecast — avisa antes de estourar
+      - type: PERCENTAGE
+        threshold: 90
+        basedOn: FORECASTED_COST
+        notifications:
+          - slack: "#finops-alerts"
+      - type: PERCENTAGE
+        threshold: 100
+        basedOn: ACTUAL_COST
+        notifications:
+          - slack: "#finops-critical"
+          - email: "leandroninja@gmail.com"
+
+  # orçamento separado por namespace
+  - name: harness-demo-production-ns
+    identifier: harness_demo_production_ns
+    description: "Orçamento do namespace production"
+    scope:
+      type: kubernetes
+      clusterName: gke-harness-demo
+      namespace: harness-demo-production
+    budget:
+      type: SPECIFIED_AMOUNT
+      amount: 350
+      period: MONTHLY
+    alerts:
+      - type: PERCENTAGE
+        threshold: 80
+        basedOn: ACTUAL_COST
+        notifications:
+          - slack: "#platform-team"
+
+  - name: harness-demo-staging-ns
+    identifier: harness_demo_staging_ns
+    description: "Orçamento do namespace staging — deve ser bem menor que prod"
+    scope:
+      type: kubernetes
+      clusterName: gke-harness-demo
+      namespace: harness-demo-staging
+    budget:
+      type: SPECIFIED_AMOUNT
+      amount: 100
+      period: MONTHLY
+    alerts:
+      - type: PERCENTAGE
+        threshold: 90
+        basedOn: ACTUAL_COST
+        notifications:
+          - slack: "#platform-team"
+
+# políticas de governança de custo
+costGovernancePolicies:
+  # desliga recursos idle fora do horário comercial
+  - name: shutdown-staging-overnight
+    identifier: shutdown_staging_overnight
+    description: "Desliga staging fora do horário comercial pra economizar"
+    type: ScheduledAction
+    scope:
+      namespace: harness-demo-staging
+    action:
+      type: SCALE_DOWN
+      targetReplicas: 0
+    schedule:
+      # desliga às 20h horário de Brasília (23h UTC)
+      down: "0 23 * * 1-5"
+      # liga às 7h horário de Brasília (10h UTC)
+      up: "0 10 * * 1-5"
+      timezone: "America/Sao_Paulo"
+
+  # rightsizing automático pra workloads de staging
+  - name: auto-rightsize-staging
+    identifier: auto_rightsize_staging
+    description: "Aplica recomendações de rightsizing automaticamente no staging"
+    type: Rightsizing
+    scope:
+      namespace: harness-demo-staging
+    settings:
+      # aplica se saving for maior que 20%
+      minSavingPercentage: 20
+      # não aplica se CPU utilization médio for menor que 5% (idle total)
+      minCpuUtilization: 5
+      bufferPercentage: 15
+      autoApply: true
+
+  # anomaly detection
+  - name: anomaly-detection-production
+    identifier: anomaly_detection_production
+    description: "Detecta e alerta anomalias de custo em produção"
+    type: AnomalyDetection
+    scope:
+      namespace: harness-demo-production
+    settings:
+      # alerta se custo do dia for > 2x a média dos últimos 7 dias
+      threshold: 2.0
+      lookbackDays: 7
+      notifications:
+        - slack: "#finops-alerts"
+
+# labels que devem existir em todos os recursos pra alocação de custo
+costAllocationTags:
+  required:
+    - team
+    - project
+    - env
+  optional:
+    - owner
+    - cost-center
+    - feature

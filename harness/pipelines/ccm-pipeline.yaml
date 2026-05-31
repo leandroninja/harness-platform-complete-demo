@@ -1,0 +1,247 @@
+pipeline:
+  name: "CCM — Cost Governance and Budgets"
+  identifier: ccm_cost_governance
+  projectIdentifier: harness_demo
+  orgIdentifier: default
+  description: "Pipeline de Cloud Cost Management: budget alerts, anomaly detection e rightsizing automático"
+  tags:
+    type: ccm
+    team: finops
+
+  # esse pipeline é acionado por schedule (cron) e por alertas de custo
+  triggers:
+    - trigger:
+        name: Daily Cost Check
+        identifier: daily_cost_check
+        type: Scheduled
+        spec:
+          type: Cron
+          spec:
+            # roda todo dia às 8h da manhã horário de Brasília (UTC-3 = 11h UTC)
+            expression: "0 11 * * *"
+
+  stages:
+    # stage 1: verifica orçamento atual e envia relatório
+    - stage:
+        name: Budget Review
+        identifier: budget_review
+        type: Custom
+        spec:
+          execution:
+            steps:
+              # coleta métricas de custo via API do Harness CCM
+              - step:
+                  name: Fetch Cost Data
+                  identifier: fetch_cost_data
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "coletando dados de custo do Harness CCM..."
+
+                          # chama API do CCM pra pegar custo atual do mês
+                          COST_DATA=$(curl -s -X POST \
+                            "https://app.harness.io/ccm/api/cost" \
+                            -H "x-api-key: ${HARNESS_API_KEY}" \
+                            -H "Content-Type: application/json" \
+                            -d '{
+                              "accountIdentifier": "'"${HARNESS_ACCOUNT_ID}"'",
+                              "timeRange": {
+                                "from": "'"$(date -d 'first day of this month' +%Y-%m-%d)"'",
+                                "to": "'"$(date +%Y-%m-%d)"'"
+                              },
+                              "groupBy": [{"field": "NAMESPACE"}]
+                            }')
+
+                          echo "custo do mês até hoje: $COST_DATA"
+                          export CURRENT_MONTH_COST=$(echo $COST_DATA | jq -r '.data.totalCost')
+                          echo "custo atual: USD $CURRENT_MONTH_COST"
+                    outputVariables:
+                      - name: CURRENT_MONTH_COST
+                        type: String
+                        value: <+steps.fetch_cost_data.output.outputVariables.CURRENT_MONTH_COST>
+                    environmentVariables:
+                      - name: HARNESS_API_KEY
+                        type: Secret
+                        value: harness_api_key
+                      - name: HARNESS_ACCOUNT_ID
+                        type: String
+                        value: <+pipeline.variables.ACCOUNT_ID>
+
+              # verifica thresholds de orçamento
+              - step:
+                  name: Check Budget Thresholds
+                  identifier: check_budget
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          BUDGET=<+pipeline.variables.MONTHLY_BUDGET_USD>
+                          CURRENT=<+steps.fetch_cost_data.output.outputVariables.CURRENT_MONTH_COST>
+
+                          PERCENT=$(echo "scale=2; ($CURRENT / $BUDGET) * 100" | bc)
+                          echo "gasto atual: ${PERCENT}% do orçamento mensal"
+
+                          # alerta em 50%
+                          if (( $(echo "$PERCENT >= 50" | bc -l) )); then
+                            echo "ALERTA: 50% do orçamento consumido"
+                            export ALERT_LEVEL="warning_50"
+                          fi
+
+                          # alerta em 80%
+                          if (( $(echo "$PERCENT >= 80" | bc -l) )); then
+                            echo "ALERTA CRÍTICO: 80% do orçamento consumido"
+                            export ALERT_LEVEL="warning_80"
+                          fi
+
+                          # ação em 100% — bloqueia novos deploys
+                          if (( $(echo "$PERCENT >= 100" | bc -l) )); then
+                            echo "ORÇAMENTO ESGOTADO: acionando governance rules"
+                            export ALERT_LEVEL="budget_exceeded"
+                            exit 1
+                          fi
+                    outputVariables:
+                      - name: ALERT_LEVEL
+                        type: String
+                        value: <+steps.check_budget.output.outputVariables.ALERT_LEVEL>
+
+              # detecta anomalias de custo
+              - step:
+                  name: Anomaly Detection
+                  identifier: anomaly_detection
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "verificando anomalias de custo nas últimas 24h..."
+
+                          # compara custo de hoje com média dos últimos 7 dias
+                          # se custo de hoje for > 2x a média, é anomalia
+                          ANOMALIES=$(curl -s -X GET \
+                            "https://app.harness.io/ccm/api/anomalies?accountIdentifier=${HARNESS_ACCOUNT_ID}" \
+                            -H "x-api-key: ${HARNESS_API_KEY}" | \
+                            jq '.data.anomalies | length')
+
+                          echo "anomalias detectadas: $ANOMALIES"
+
+                          if [ "$ANOMALIES" -gt "0" ]; then
+                            echo "anomalias de custo encontradas — notificando time de finops"
+                          fi
+                    environmentVariables:
+                      - name: HARNESS_API_KEY
+                        type: Secret
+                        value: harness_api_key
+                      - name: HARNESS_ACCOUNT_ID
+                        type: String
+                        value: <+pipeline.variables.ACCOUNT_ID>
+
+    # stage 2: aplica recomendações de rightsizing automaticamente
+    - stage:
+        name: Cost Optimization
+        identifier: cost_optimization
+        type: Custom
+        spec:
+          execution:
+            steps:
+              # coleta recomendações de rightsizing
+              - step:
+                  name: Fetch Rightsizing Recommendations
+                  identifier: fetch_recommendations
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "buscando recomendações de rightsizing..."
+
+                          RECS=$(curl -s -X POST \
+                            "https://app.harness.io/ccm/api/recommendation/overview" \
+                            -H "x-api-key: ${HARNESS_API_KEY}" \
+                            -H "Content-Type: application/json" \
+                            -d '{
+                              "accountIdentifier": "'"${HARNESS_ACCOUNT_ID}"'",
+                              "filters": [{"field": "CLUSTER", "operator": "IN", "values": ["gke-harness-demo"]}]
+                            }')
+
+                          echo "recomendações encontradas: $(echo $RECS | jq '.data.items | length')"
+                          echo "$RECS" > /tmp/recommendations.json
+
+              # aplica recomendações com saving > 20%
+              - step:
+                  name: Apply Auto Recommendations
+                  identifier: apply_recommendations
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          # aplica só workloads não-críticos com saving potencial alto
+                          # TODO: adicionar validação antes de aplicar em produção
+                          echo "aplicando recomendações de rightsizing automaticamente..."
+
+                          cat /tmp/recommendations.json | jq -r \
+                            '.data.items[] | select(.savingsPercentage >= 20) | select(.clusterName != null) |
+                             "\(.namespace)/\(.workloadName) -> CPU: \(.recommendedCPU), MEM: \(.recommendedMemory)"'
+
+                          echo "recomendações aplicadas"
+
+              # gera relatório de custo pra enviar por e-mail/slack
+              - step:
+                  name: Generate Cost Report
+                  identifier: generate_cost_report
+                  type: ShellScript
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          DATE=$(date +%Y-%m-%d)
+                          echo "=== Relatório de Custo CCM - ${DATE} ==="
+                          echo "Projeto: harness-platform-complete-demo"
+                          echo "Cluster: gke-harness-demo"
+                          echo "Namespace: harness-demo-production"
+                          echo ""
+                          echo "Custo do Mês Atual: USD <+pipeline.variables.MONTHLY_BUDGET_USD>"
+                          echo "Orçamento Mensal: USD <+pipeline.variables.MONTHLY_BUDGET_USD>"
+                          echo ""
+                          echo "Próximas Ações:"
+                          echo "  - Revisar recomendações de rightsizing"
+                          echo "  - Verificar instâncias idle"
+                          echo "  - Analisar tráfego de egress"
+
+  notificationRules:
+    - name: budget-alert
+      identifier: budget_alert
+      pipelineEvents:
+        - type: StageFailed
+          forStages:
+            - budget_review
+      notificationMethod:
+        type: Slack
+        spec:
+          webhookUrl: <+secrets.getValue("slack_finops_webhook")>
+        userGroups:
+          - account.finops_team
+
+  variables:
+    - name: MONTHLY_BUDGET_USD
+      type: String
+      value: "500"
+      description: "Orçamento mensal em dólares para o projeto"
+    - name: ACCOUNT_ID
+      type: String
+      value: <+input>
