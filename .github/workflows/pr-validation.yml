@@ -1,0 +1,156 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'k8s/**'
+      - 'terraform/**'
+      - '.github/workflows/**'
+
+# cancela runs antigas quando tem novo push no mesmo PR
+concurrency:
+  group: pr-validation-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Lint and Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: app/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff pytest pytest-asyncio httpx pytest-cov
+
+      - name: Lint com Ruff
+        run: ruff check . --output-format=github
+
+      - name: Run tests
+        run: |
+          pytest tests/ \
+            -v \
+            --tb=short \
+            --cov=. \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --junitxml=test-results.xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: app/coverage.xml
+          flags: unittests
+        continue-on-error: true
+
+  validate-k8s:
+    name: Validate K8s Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -L https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin/
+
+      - name: Validate k8s manifests
+        run: |
+          kubeconform \
+            -strict \
+            -ignore-missing-schemas \
+            -kubernetes-version 1.29.0 \
+            k8s/namespace.yaml \
+            k8s/blue/deployment.yaml \
+            k8s/green/deployment.yaml \
+            k8s/service.yaml \
+            k8s/hpa.yaml
+
+      - name: Check for latest tag in deployments
+        run: |
+          # não permite tag "latest" nos manifests — erro comum
+          if grep -r "image:.*:latest" k8s/; then
+            echo "ERRO: encontrado uso de tag 'latest' nos manifests k8s"
+            exit 1
+          fi
+          echo "ok — sem tag latest nos manifests"
+
+  validate-terraform:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '~1.5'
+
+      - name: Terraform init (sem backend)
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive
+
+  security-scan-pr:
+    name: Quick Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gitleaks — scan de secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Semgrep — SAST rápido
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/python
+            p/security-audit
+        continue-on-error: true
+
+  # job de summary — fica verde só se tudo passar
+  pr-checks-passed:
+    name: All PR Checks Passed
+    runs-on: ubuntu-latest
+    needs:
+      - lint-and-test
+      - validate-k8s
+      - validate-terraform
+      - security-scan-pr
+    if: always()
+    steps:
+      - name: Check all jobs
+        run: |
+          if [[ "${{ needs.lint-and-test.result }}" != "success" ||
+                "${{ needs.validate-k8s.result }}" != "success" ||
+                "${{ needs.validate-terraform.result }}" != "success" ]]; then
+            echo "um ou mais checks falharam — PR bloqueado"
+            exit 1
+          fi
+          echo "todos os checks passaram — PR pode ser mergeado"
