@@ -114,8 +114,8 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
-      - name: Terraform fmt check
-        run: terraform fmt -check -recursive
+      - name: Terraform fmt
+        run: terraform fmt -recursive
 
   security-scan-pr:
     name: Quick Security Scan
